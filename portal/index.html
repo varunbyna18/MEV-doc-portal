@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="en-GB" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MEV Detector Docs</title>
+<link rel="stylesheet" href="assets/style.css">
+<script>try{var t=localStorage.getItem('theme');if(t)document.documentElement.dataset.theme=t}catch(e){}</script>
+</head>
+<body>
+<header class="top">
+  <button class="btn" id="menu" aria-label="Menu">☰</button>
+  <div class="brand"><div class="logo">⛓</div><div>MEV Sandwich Detector<small>Documentation &amp; results</small></div></div>
+  <div class="spacer"></div>
+  <button class="btn" id="sbtn">Search <span class="kbd">Ctrl K</span></button>
+  <button class="btn" id="theme" title="Toggle theme">◐</button>
+</header>
+
+<div class="shell">
+<nav class="rail" id="rail"></nav>
+<main>
+
+<!-- ============ 01 OVERVIEW ============ -->
+<section class="page" id="overview" data-title="Overview" data-group="Start">
+  <div class="eyebrow">M.Tech project · Amrita School of Computing</div>
+  <h1>Real-time sandwich-attack detection and on-chain recording for Ethereum</h1>
+  <p class="lead">A prototype that finds sandwich-attack candidates in pending transactions and mined blocks, confirms them from transaction receipts, and records the attacker in a Solidity reputation contract.</p>
+
+  <div class="grid g4" style="margin:22px 0">
+    <div class="card"><div class="stat">0.74<small>/ 0.75</small></div><div class="stat-l">Layer 2 precision / recall on the synthetic workload (set by the assumed mix)</div></div>
+    <div class="card"><div class="stat">367 → 25</div><div class="stat-l">mainnet candidates → validated, 598 blocks (120 min)</div></div>
+    <div class="card"><div class="stat">23 / 24</div><div class="stat-l">validated candidates judged genuine (precision 0.96, Wilson 0.80–0.99)</div></div>
+    <div class="card"><div class="stat">523<small>ms</small></div><div class="stat-l">median delay, block header → flagged candidate (95th pct 1 125 ms)</div></div>
+  </div>
+
+  <h2>The problem</h2>
+  <p>In a <b>sandwich attack</b> an adversary buys a token just before a user's swap (front-run), so the user trades at a worse price, and sells just after (back-run), keeping the difference. Existing tools mostly observe and report these attacks. They leave no persistent, verifiable consequence for the attacker.</p>
+  <h2>What was built</h2>
+  <div class="grid g2">
+    <div class="card"><h4>Layer 1 · mempool detector</h4><p>Watches <code>newPendingTransactions</code>, keeps a rolling buffer of 3 000 transactions and flags same router, different sender, higher gas inside a 12 s window.</p><a href="#layer1">Read more →</a></div>
+    <div class="card"><h4>Layer 2 · block reconstruction</h4><p>Reads each mined block, groups transactions by (sender, contract) and looks for a front-run and back-run around another sender's swap. The primary detector.</p><a href="#layer2">Read more →</a></div>
+    <div class="card"><h4>Token-flow validation</h4><p>Checks each candidate against ERC-20 <code>Transfer</code> logs from the receipts: same pool, same direction, back-run unwinds, attacker profits.</p><a href="#validation">Read more →</a></div>
+    <div class="card"><h4>ReputationSlippage contract</h4><p>Owner-only <code>recordAttack(address)</code> on Base Sepolia lowers an attacker's reputation and emits <code>AttackRecorded</code>.</p><a href="#contract">Read more →</a></div>
+  </div>
+  <div class="note warn"><b>Status</b>This is a prototype. Detection is heuristic, mainnet labels were assigned by the author without a second labeller, mainnet recall is unknown, and on-chain measurements come from a local chain. "Real-time" here means each mined block is analysed and a candidate reported within the 12 s block interval. Detection is after inclusion, so it cannot stop the attack it reports.</div>
+
+  <h2>How to read these docs</h2>
+  <ul>
+    <li><b>Design</b> pages describe the architecture and each component.</li>
+    <li><b>Evaluation</b> describes the method, workloads and metrics.</li>
+    <li><b>Results</b> pages have interactive charts. Click a legend entry to hide a series, hover for values.</li>
+    <li><b>Reference</b> pages hold limitations, run instructions and a FAQ. Press <span class="kbd">/</span> or <span class="kbd">Ctrl K</span> to search.</li>
+  </ul>
+  <div class="pn"></div>
+</section>
+
+<!-- ============ 02 ARCHITECTURE ============ -->
+<section class="page" id="architecture" data-title="Architecture" data-group="Design">
+  <div class="eyebrow">Design</div><h1>Architecture</h1>
+  <p class="lead">Two detectors feed one confirmation stage. A confirmed attacker is written to a contract on Base Sepolia and shown on a dashboard.</p>
+  <div class="diagram"><svg viewBox="0 0 900 420" role="img" aria-label="Architecture diagram">
+    <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="currentColor" style="color:var(--muted)"/></marker></defs>
+    <rect class="box b4" x="10" y="150" width="150" height="110"/><text x="85" y="182" text-anchor="middle" font-weight="700">Ethereum mainnet</text><text class="sm" x="85" y="202" text-anchor="middle">Chainstack RPC</text><text class="sm" x="85" y="218" text-anchor="middle">HTTPS + WebSocket</text><text class="sm" x="85" y="234" text-anchor="middle">newHeads · pending</text>
+    <rect class="box" x="230" y="40" width="190" height="100"/><text x="325" y="68" text-anchor="middle" font-weight="700">Layer 1 · mempool</text><text class="sm" x="325" y="88" text-anchor="middle">fetch queue 2 000 · 20 req/s</text><text class="sm" x="325" y="104" text-anchor="middle">rolling buffer 3 000 · 12 s window</text><text class="sm" x="325" y="120" text-anchor="middle">same router · other sender · gas</text>
+    <rect class="box b2" x="230" y="280" width="190" height="100"/><text x="325" y="308" text-anchor="middle" font-weight="700">Layer 2 · block</text><text class="sm" x="325" y="328" text-anchor="middle">eth_getBlockByNumber</text><text class="sm" x="325" y="344" text-anchor="middle">group by (sender, contract)</text><text class="sm" x="325" y="360" text-anchor="middle">front-run · victim · back-run</text>
+    <rect class="box b3" x="490" y="160" width="170" height="100"/><text x="575" y="188" text-anchor="middle" font-weight="700">Token-flow validation</text><text class="sm" x="575" y="208" text-anchor="middle">eth_getBlockReceipts</text><text class="sm" x="575" y="224" text-anchor="middle">ERC-20 Transfer logs</text><text class="sm" x="575" y="240" text-anchor="middle">pool · direction · unwind · profit</text>
+    <rect class="box" x="730" y="60" width="160" height="90"/><text x="810" y="88" text-anchor="middle" font-weight="700">Backend (Node.js)</text><text class="sm" x="810" y="108" text-anchor="middle">flagAttacker() · 10 min throttle</text><text class="sm" x="810" y="124" text-anchor="middle">REST :3001 · WebSocket :8080</text>
+    <rect class="box b2" x="730" y="190" width="160" height="80"/><text x="810" y="218" text-anchor="middle" font-weight="700">ReputationSlippage</text><text class="sm" x="810" y="238" text-anchor="middle">Base Sepolia · recordAttack</text><text class="sm" x="810" y="254" text-anchor="middle">emits AttackRecorded</text>
+    <rect class="box b4" x="730" y="310" width="160" height="80"/><text x="810" y="338" text-anchor="middle" font-weight="700">Dashboard</text><text class="sm" x="810" y="358" text-anchor="middle">React + D3</text><text class="sm" x="810" y="374" text-anchor="middle">WebSocket feed</text>
+    <path class="ar" d="M160 180 L230 100"/><path class="ar" d="M160 230 L230 320"/>
+    <path class="ar" d="M420 100 L490 190"/><path class="ar" d="M420 330 L490 240"/>
+    <path class="ar" d="M660 200 L730 120"/><path class="ar" d="M810 150 L810 190"/><path class="ar" d="M780 270 L780 310"/>
+    <text class="sm" x="445" y="136">candidates</text><text class="sm" x="445" y="296">candidates</text><text class="sm" x="670" y="150">confirmed</text>
+  </svg></div>
+  <h2>Components</h2>
+  <div class="tw"><table><thead><tr><th>Component</th><th>Role</th><th>Source</th></tr></thead><tbody>
+  <tr><td>Block stream</td><td class="w">Subscribes to <code>newHeads</code>; processes a block number only if higher than the last one.</td><td><code>server.js</code></td></tr>
+  <tr><td>Layer 1</td><td class="w">Rate-limited pending fetch queue, rolling buffer and the ordering rule.</td><td><code>server.js</code>, <code>detector.js</code></td></tr>
+  <tr><td>Layer 2</td><td class="w">Block reconstruction with the (sender, contract) grouping.</td><td><code>server.js</code>, <code>detector.js</code></td></tr>
+  <tr><td>Validation</td><td class="w">Receipt-based token-flow check with 12 unit tests.</td><td><code>validator.js</code>, <code>test_validator.js</code></td></tr>
+  <tr><td>Contract</td><td class="w">Reputation, stake and slippage tiers.</td><td><code>ReputationSlippage.sol</code></td></tr>
+  <tr><td>Evaluation harness</td><td class="w">Seeded workload, CPU and chain benchmarks, live runner, labelling tools.</td><td><code>workload.js</code>, <code>bench_*.js</code>, <code>chain_bench.js</code>, <code>live_eval.js</code></td></tr>
+  </tbody></table></div>
+  <h2>Design goals</h2>
+  <ol>
+    <li><b>Block-time operation.</b> A block is analysed well inside the 12 s interval.</li>
+    <li><b>Public data only.</b> Only what a standard RPC provider exposes. No builder or relay access.</li>
+    <li><b>Layered confidence.</b> A cheap structural rule proposes, a stricter receipt check confirms.</li>
+    <li><b>Auditable output.</b> Each detection carries the three transaction hashes of the sandwich.</li>
+    <li><b>On-chain consequence.</b> A confirmed detection changes contract state.</li>
+  </ol>
+  <h2>Design decisions</h2>
+  <div class="tw"><table><thead><tr><th>Decision</th><th>Consequence</th></tr></thead><tbody>
+  <tr><td>Two layers</td><td class="w">Mempool gives early warning, block analysis gives coverage. Layer 1 sees few attacks because of private order flow.</td></tr>
+  <tr><td>Group by (sender, contract)</td><td class="w">Finds bot-contract attacks without decoding calldata. Misses split senders and short calldata.</td></tr>
+  <tr><td>Validation from receipts</td><td class="w">Removes look-alike activity. Costs one extra RPC call per block and is limited to ERC-20 and pool-level accounting.</td></tr>
+  <tr><td>Owner-only recording</td><td class="w">Prevents spam writes. Single trusted writer, no undo.</td></tr>
+  <tr><td>Cap of five per block</td><td class="w">Bounds work and flag volume. Lowers recall in large blocks.</td></tr>
+  </tbody></table></div>
+  <div class="pn"></div>
+</section>
+
+<!-- ============ 03 LAYER 1 ============ -->
+<section class="page" id="layer1" data-title="Layer 1 · Mempool" data-group="Design">
+  <div class="eyebrow">Design</div><h1>Layer 1: mempool detector</h1>
+  <p class="lead">Screens pending transactions as they arrive. It is the only path that can report an attack before it is mined, but it sees a small part of the pool and found nothing on mainnet.</p>
+  <h2>Pipeline</h2>
+  <ol class="steps" style="list-style:none;padding:0">
+    <li class="step"><b>Subscribe.</b> <code>eth_subscribe newPendingTransactions</code> delivers hashes. Each connection reconnects after 5 s if it drops.</li>
+    <li class="step"><b>Queue.</b> Hashes enter a queue of 2 000. When full, the oldest is dropped. A worker fetches full transactions at 20 requests per second with <code>eth_getTransactionByHash</code>.</li>
+    <li class="step"><b>Buffer.</b> Fetched transactions go into a rolling buffer of 3 000. Swaps are identified by an allow-list of 20 routers and 25 function selectors.</li>
+    <li class="step"><b>Match.</b> For each new swap, find an earlier transaction from the same sender in the same pool key with higher gas, and a victim from a different sender with gas between the two, all inside 12 s.</li>
+  </ol>
+  <div class="code l"><span class="lb">server.js · detectRealSandwich (condensed)</span><pre>pool key  = router address + function selector
+front     : same sender as the new tx, gasPrice  &gt; new tx
+victim    : other sender, gasPrice &lt; front and &gt; new tx
+all three : within SANDWICH_WINDOW_MS = 12 000, same pool key
+cooldown  : one detection per attacker per 12 s</pre></div>
+  <h2>Parameters</h2>
+  <div class="tw"><table><thead><tr><th>Parameter</th><th class="n">Value</th></tr></thead><tbody>
+  <tr><td>Rolling buffer</td><td class="n">3 000 transactions</td></tr><tr><td>Candidate window</td><td class="n">12 s</td></tr>
+  <tr><td>Pending-hash queue</td><td class="n">2 000</td></tr><tr><td>Fetch rate</td><td class="n">20 requests/s</td></tr>
+  <tr><td>Router allow-list / selectors</td><td class="n">20 / 25</td></tr><tr><td>Confidence label</td><td class="n">0.95 (fixed, not calibrated)</td></tr></tbody></table></div>
+  <h2>The eviction defect</h2>
+  <div class="note bad"><b>Bug found during evaluation</b>When the buffer first exceeded 3 000 entries, the eviction loop read a field that did not exist on the entry, which threw a <code>TypeError</code>. Every later transaction raised an exception that the code caught and discarded, so Layer 1 silently stopped analysing. In a 60 000-transaction run this caused about 57 000 exceptions and a recall below 0.01. The fix is a one-word change in the comparison.</div>
+  <div data-chart="l1"></div>
+  <div data-table="l1"></div>
+  <h2>Limits</h2>
+  <ul>
+    <li>Private order flow (bundles) never appears as pending, so those attacks are invisible here.</li>
+    <li>The fetch cap lets through about a fifth of pending hashes on mainnet (see <a href="#results-live">live results</a>).</li>
+    <li>The pool key is router plus selector, not the actual pool, so two pools sharing both are treated as one.</li>
+    <li>Layer 1 produced no mainnet detection in 120 minutes. With no positive case, this is not evidence about the rule's accuracy.</li>
+  </ul>
+  <div class="pn"></div>
+</section>
+
+<!-- ============ 04 LAYER 2 ============ -->
+<section class="page" id="layer2" data-title="Layer 2 · Block" data-group="Design">
+  <div class="eyebrow">Design</div><h1>Layer 2: block reconstruction</h1>
+  <p class="lead">The primary detector. It reads each mined block and reconstructs the sandwich from transaction order.</p>
+  <h2>Algorithm</h2>
+  <div class="code l"><span class="lb">Layer 2 matching rule</span><pre>input : block with m transactions in block order     output: D, at most 5 candidates
+if m &lt; 3: return []
+S  = txs with a destination, destination not in the 18-token blacklist, calldata &gt;= 100 bytes
+group S by key (sender, destination); keep groups with 2+ members
+for each group G, each ordered pair (a, b) in G with a before b:
+    for each v in S between a and b:
+        if sender(v) != sender(a) and destination(v) != destination(a):
+            add (a, v, b); stop searching G
+    if |D| == 5: return D</pre></div>
+  <h2>Why it works</h2>
+  <p>Attackers usually send both legs from one address to a contract they control, so grouping by (sender, contract) finds the legs without decoding calldata. Requiring the victim to be on a different contract excludes bots that only call their own contract.</p>
+  <h2>Filters</h2>
+  <div class="grid g3">
+    <div class="card"><h4>Calldata ≥ 100 bytes</h4><p>Real swaps carry 100+ bytes. Plain token transfers carry about 68.</p></div>
+    <div class="card"><h4>Token blacklist (18)</h4><p>USDT, USDC, DAI, BUSD, USDP, FRAX, TUSD, WETH, WBTC, LINK, UNI, MATIC, SHIB, APE, BAT, SAND, CHZ, YFI.</p></div>
+    <div class="card"><h4>Cap of 5 per block</h4><p>Bounds work and flag volume. It limits recall in blocks above 400 transactions.</p></div>
+  </div>
+  <h2>Limits</h2>
+  <ul>
+    <li>Attacks with legs from different senders, calldata shorter than 100 bytes, or a victim that uses the attacker's own contract are outside the rule.</li>
+    <li>The first swap-shaped transaction between the legs is taken as the victim. On the synthetic workload it is the injected victim in only about a third of detections (0.32–0.35). Whether an attack is reported is unaffected, but the reported victim is unreliable.</li>
+    <li>On mainnet the rule alone is about 7 % precise. See <a href="#validation">validation</a>.</li>
+  </ul>
+  <div class="pn"></div>
+</section>
+
+<!-- ============ 05 VALIDATION ============ -->
+<section class="page" id="validation" data-title="Token-flow validation" data-group="Design">
+  <div class="eyebrow">Design</div><h1>Token-flow validation</h1>
+  <p class="lead">A second stage that confirms or rejects each candidate from the transaction receipts.</p>
+  <div class="steps" style="margin-top:16px">
+    <div class="step"><b>Fetch receipts.</b> One <code>eth_getBlockReceipts</code> call per block, used for all candidates in it.</div>
+    <div class="step"><b>Reverts.</b> Reject if the front-run, victim or back-run reverted.</div>
+    <div class="step"><b>Net flows.</b> From ERC-20 <code>Transfer</code> logs, compute each address's net balance change per token for each transaction.</div>
+    <div class="step"><b>Shared pool.</b> Find a pool address and token whose net change has the same sign in the front-run and the victim's swap. Otherwise reject.</div>
+    <div class="step"><b>Unwind.</b> The back-run must move that pool in the opposite direction by 0.8 to 1.25 times the front-run.</div>
+    <div class="step"><b>Profit.</b> The attacker must end with more of the quote token than it started with.</div>
+  </div>
+  <h2>Outcome on mainnet</h2>
+  <div data-chart="reasons"></div>
+  <div data-table="reasons"></div>
+  <h2>Limits</h2>
+  <ul>
+    <li>Pool identity comes from the token holder, which cannot separate pools that share one holder (for example Uniswap v4's singleton). The one validated false positive was of this kind.</li>
+    <li>The profit test uses the quote token only and is not net of gas. Four validated candidates passed with a gross profit of six raw units.</li>
+    <li>It does not decode calldata, handle native-ether legs, or estimate the victim's loss.</li>
+  </ul>
+  <div class="pn"></div>
+</section>
+
+<!-- ============ 06 CONTRACT ============ -->
+<section class="page" id="contract" data-title="Smart contract" data-group="Design">
+  <div class="eyebrow">Design</div><h1>ReputationSlippage contract</h1>
+  <p class="lead">Solidity 0.8.20, compiled with Hardhat. Deployed on Base Sepolia at <code>0xb6CD63eb…db82</code>.</p>
+  <h2>Behaviour</h2>
+  <ul>
+    <li><code>recordAttack(attacker)</code> is <b>owner only</b>. It increments the attack count, sets the flag and emits <code>AttackRecorded</code>.</li>
+    <li><b>Reputation</b> = staked amount × blocks since staking. A flagged address with <i>c</i> recorded attacks has it multiplied by (10 − c)/10, capped at 9 attacks.</li>
+    <li><b>Allowed slippage</b> is a step function of reputation: 500, 200, 100, 10 or 1 basis points.</li>
+    <li><code>executeSwap</code> checks an output against the allowed slippage and emits <code>SwapExecuted</code>.</li>
+  </ul>
+  <h2>Public interface</h2>
+  <div class="tw"><table><thead><tr><th>Function / event</th><th>Description</th></tr></thead><tbody>
+  <tr><td><code>recordAttack(address)</code></td><td class="w">Owner only. Records an attack and flags the address.</td></tr>
+  <tr><td><code>getAttackCount</code>, <code>attackCount</code>, <code>flagged</code></td><td class="w">Read the attack record.</td></tr>
+  <tr><td><code>stake()</code>, <code>unstake(uint256)</code></td><td class="w">Add or withdraw stake; the sender becomes a validator.</td></tr>
+  <tr><td><code>getValidatorInfo</code>, <code>validators</code>, <code>validatorList</code>, <code>getValidatorCount</code>, <code>totalStaked</code></td><td class="w">Read validator data.</td></tr>
+  <tr><td><code>calculateReputation(address)</code></td><td class="w">Stake × blocks, reduced for flagged addresses.</td></tr>
+  <tr><td><code>getAllowedSlippage(address)</code></td><td class="w">Tiered slippage in basis points.</td></tr>
+  <tr><td><code>executeSwap(uint256,uint256,uint256)</code></td><td class="w">Checks an output against the allowed slippage.</td></tr>
+  <tr><td><code>owner()</code>, <code>BPS_DENOMINATOR()</code></td><td class="w">Owner and the constant 10 000.</td></tr>
+  <tr><td>Events</td><td class="w"><code>AttackRecorded</code>, <code>Staked</code>, <code>Unstaked</code>, <code>SlippageCalculated</code>, <code>SwapExecuted</code></td></tr>
+  </tbody></table></div>
+  <h2>Gas (local Hardhat node)</h2>
+  <div data-table="gas"></div>
+  <p>A first <code>recordAttack</code> for an address writes empty storage (70 922 gas); a repeat costs 33 922. The figures exclude the data fee that Base charges for posting calldata to Ethereum.</p>
+  <div class="note warn"><b>Limitations of the contract</b>It records an attacker but does not prevent a sandwich, and it matters only to applications that read it. It relies on one owner key, and a false positive cannot be undone. The tier thresholds are fixed numbers in wei × blocks, so for a stake of about one ether the reputation exceeds the top tier after one block and a reduction of at most 90 % does not move it down a tier. A flagged address that never stakes has zero reputation in any case. The thresholds need rescaling before the tiers separate realistic stakes.</div>
+  <div class="pn"></div>
+</section>
+
+<!-- ============ 07 BACKEND ============ -->
+<section class="page" id="backend" data-title="Backend &amp; API" data-group="Design">
+  <div class="eyebrow">Design</div><h1>Backend and API</h1>
+  <p class="lead">One Node.js process: Express on port 3001, a WebSocket server on 8080, and two WebSocket clients to the RPC provider.</p>
+  <h2>REST endpoints</h2>
+  <div class="tw"><table><thead><tr><th>Method</th><th>Path</th><th>Effect</th></tr></thead><tbody>
+  <tr><td>POST</td><td><code>/api/live/start</code></td><td class="w">Turns live mode on. Blocks and pending transactions are then analysed and flags are sent.</td></tr>
+  <tr><td>POST</td><td><code>/api/live/stop</code></td><td class="w">Turns live mode off.</td></tr>
+  <tr><td>GET</td><td><code>/api/live/status</code></td><td class="w">Returns <code>{ isLive }</code>.</td></tr></tbody></table></div>
+  <h2>WebSocket messages (port 8080)</h2>
+  <p>Every message is JSON: <code>{ "type": "...", "payload": ... }</code>.</p>
+  <div class="tw"><table><thead><tr><th>Type</th><th>Meaning</th></tr></thead><tbody>
+  <tr><td><code>MEV_DETECTION</code></td><td class="w">Attacker, victim, router/contract, three hashes, gas prices, confidence (0.75 for Layer 2, 0.95 for Layer 1), source (<code>BLOCK_RECONSTRUCTION</code> or <code>PENDING_MEMPOOL</code>), block number.</td></tr>
+  <tr><td><code>ONCHAIN_FLAG</code></td><td class="w">Attacker and the <code>recordAttack</code> transaction hash, after confirmation.</td></tr>
+  <tr><td><code>LIVE_STATUS</code></td><td class="w">Live mode on or off.</td></tr>
+  <tr><td><code>MEMPOOL_LOG</code>, <code>STATE_UPDATE</code>, <code>BATCH_SEALED</code>, <code>METRICS</code>, <code>REORDER_METRICS</code></td><td class="w">Dashboard demonstration pipeline (see note).</td></tr></tbody></table></div>
+  <div class="note warn"><b>Dashboard demonstration pipeline</b>The backend also signs a digest of up to 15 transactions per block with a throw-away key, groups them into batches and shows 15 simulated validator nodes. The latency and accuracy values in that panel are generated for display, not measured. All results in these docs come from the evaluation harness.</div>
+  <h2>Configuration</h2>
+  <p>Settings are read from environment variables, with defaults for the public node endpoints. Keep secrets in a <code>.env</code> file that is not committed.</p>
+  <div class="tw"><table><thead><tr><th>Variable</th><th>Purpose</th></tr></thead><tbody>
+  <tr><td><code>ALCHEMY_WSS_URL</code>, <code>ALCHEMY_HTTPS_URL</code></td><td class="w">Mainnet WebSocket and HTTPS endpoints (the evaluation used Chainstack).</td></tr>
+  <tr><td><code>REPUTATION_RPC_URL</code></td><td class="w">Base Sepolia endpoint.</td></tr>
+  <tr><td><code>REPUTATION_ADDRESS</code></td><td class="w">Deployed contract address.</td></tr>
+  <tr><td><code>DEPLOYER_PRIVATE_KEY</code></td><td class="w">Owner key. If unset, on-chain flagging is disabled.</td></tr></tbody></table></div>
+  <div class="note bad"><b>Secrets</b>Do not leave provider keys as fallback defaults in source code. Move them to <code>.env</code> and rotate any key that has been committed or shared.</div>
+  <h2>On-chain bridge</h2>
+  <ul>
+    <li><code>flagAttacker()</code> signs with the owner key and sends <code>recordAttack(attacker)</code> with a gas limit of 300 000, then waits for the receipt.</li>
+    <li>A repeat flag for the same attacker is throttled for 10 minutes.</li>
+    <li>A reverted transaction is reported and the process continues.</li>
+    <li><b>Known issue:</b> concurrent flags from one account reuse a nonce and are lost (see <a href="#results-chain">chain results</a>). Assign nonces explicitly or send one at a time.</li>
+  </ul>
+  <div class="pn"></div>
+</section>
+
+<!-- ============ 08 METHOD ============ -->
+<section class="page" id="method" data-title="Experimental method" data-group="Evaluation">
+  <div class="eyebrow">Evaluation</div><h1>Experimental method</h1>
+  <p class="lead">Three environments, chosen so that detector logic, chain behaviour and real traffic can each be measured separately.</p>
+  <div class="grid g3">
+    <div class="card"><h4>Seeded synthetic workload</h4><p>Generated blocks with injected sandwiches and decoys, so precision and recall can be computed. Repeatable exactly.</p></div>
+    <div class="card"><h4>Local Hardhat chain</h4><p>2 s blocks. Measures gas, inclusion and confirmation time of flag transactions.</p></div>
+    <div class="card"><h4>Live Ethereum mainnet</h4><p>Two runs: an initial run (9 Oct 2026, flags on) and a 120-minute evaluation run (9 Nov 2026, flags off).</p></div>
+  </div>
+  <h2>Scenarios</h2>
+  <div class="tw"><table><thead><tr><th>Scenario</th><th>Varies</th><th>Fixed</th></tr></thead><tbody>
+  <tr><td>S1</td><td class="w">50 to 1 600 transactions per block, one node</td><td class="w">about 60 000 transactions per point, 5 repetitions</td></tr>
+  <tr><td>S2</td><td class="w">1, 2, 4, 8, 16 worker threads ("nodes")</td><td class="w">200 tx per block × 10 000 blocks, 3 repetitions</td></tr>
+  <tr><td>Decoy sensitivity</td><td class="w">0 to 1 % look-alike rate</td><td class="w">5 repetitions</td></tr>
+  <tr><td>Chain S1 / S2</td><td class="w">Burst size / number of submitter nodes</td><td class="w">Local Hardhat, 5 repetitions</td></tr></tbody></table></div>
+  <h2>Synthetic workload parameters</h2>
+  <div class="note warn"><b>Assumptions</b>These proportions are the author's assumptions, not measurements of mainnet.</div>
+  <div class="tw"><table><thead><tr><th>Parameter</th><th>Value</th></tr></thead><tbody>
+  <tr><td>Injected sandwiches</td><td class="w">1 % of transactions</td></tr>
+  <tr><td>Type A · bot contract</td><td class="w">60 % of attacks. Layer 2 target.</td></tr>
+  <tr><td>Type B · router call</td><td class="w">15 %. Visible to Layer 1, expected to be missed by Layer 2.</td></tr>
+  <tr><td>Type C · compact calldata</td><td class="w">15 %. Calldata under 100 bytes, removed by the Layer 2 filter.</td></tr>
+  <tr><td>Type D · split sender</td><td class="w">10 %. Legs from two addresses, evades grouping.</td></tr>
+  <tr><td>Decoys</td><td class="w">0.25 % of transactions. Non-attack groups with the same structure.</td></tr>
+  <tr><td>Gas-ordering compliance</td><td class="w">80 % of router-type attacks satisfy the Layer 1 rule.</td></tr>
+  <tr><td>Benign senders</td><td class="w">50 × the transactions per block</td></tr></tbody></table></div>
+  <p>Types C and D (25 % of attacks) lie outside the Layer 2 rule by construction, so about 0.75 is the recall ceiling for this mix.</p>
+  <h2>Metrics</h2>
+  <div class="tw"><table><thead><tr><th>Metric</th><th>Definition</th></tr></thead><tbody>
+  <tr><td>Precision / recall / F1</td><td class="w">TP/(TP+FP), TP/(TP+FN), 2PR/(P+R). Mainnet intervals use the 95 % Wilson score.</td></tr>
+  <tr><td>Latency</td><td class="w">Analysis time per block (mean, p95); on mainnet, delay from block header to flagged candidate.</td></tr>
+  <tr><td>Throughput</td><td class="w">Transactions analysed per second (in-memory).</td></tr>
+  <tr><td>Speed-up, efficiency</td><td class="w">S(n) = T₁/Tₙ and E(n) = S(n)/n.</td></tr>
+  <tr><td>Inclusion</td><td class="w">Share of submitted flag transactions that were mined.</td></tr>
+  <tr><td>Gas</td><td class="w">Execution gas from the receipt.</td></tr></tbody></table></div>
+  <h2>Labelling protocol (mainnet)</h2>
+  <p>There is no list of true attacks on mainnet. A candidate was labelled an attack if the victim's swap touched the same pool as the attacker's legs in the direction of the front-run, the back-run reversed the front-run, and the attacker's balance change was positive. All 25 validated candidates were labelled, with a systematic sample of 25 of the 342 rejected ones, presented in random order. 24 of 25 validated could be judged; one could not be decided from the transfers. <b>The labels were assigned by the author without a second labeller.</b></p>
+  <h2>Environment</h2>
+  <p>AMD Ryzen 5 5600U laptop (6 cores, 12 threads), Node.js v22.19.0, Hardhat local chain, Chainstack mainnet RPC, Base Sepolia for the contract. All timings were taken on the laptop while other software ran.</p>
+  <h2>Harness</h2>
+  <div class="tw"><table><thead><tr><th>Script</th><th>Purpose</th></tr></thead><tbody>
+  <tr><td><code>detector.js</code></td><td class="w">Decision logic copied from the backend with logging and chain calls removed. An option reproduces the original eviction code.</td></tr>
+  <tr><td><code>validator.js</code>, <code>test_validator.js</code></td><td class="w">Validation stage and its 12 unit tests.</td></tr>
+  <tr><td><code>workload.js</code></td><td class="w">Seeded block generator and labels.</td></tr>
+  <tr><td><code>bench_cpu.js</code>, <code>bench_worker.js</code></td><td class="w">Scenarios 1, 2 and decoy sensitivity (worker threads).</td></tr>
+  <tr><td><code>chain_bench.js</code></td><td class="w">Local-chain gas, inclusion and confirmation time.</td></tr>
+  <tr><td><code>live_eval.js</code></td><td class="w">Live mainnet runner. Fetches pending transactions 8 at a time, newest first, measures hash age, re-checks Layer 1 candidates after 45 s.</td></tr>
+  <tr><td><code>label_tool.py</code>, <code>evidence.js</code></td><td class="w">Randomised labelling sheet and receipt evidence.</td></tr>
+  <tr><td><code>plot.py</code>, <code>plot_live.py</code></td><td class="w">Figures.</td></tr></tbody></table></div>
+  <div class="note"><b>Note</b>The Layer 1 results describe the live runner, not the backend as first written. The live run cannot be repeated, but its per-block and per-candidate data are saved.</div>
+  <div class="pn"></div>
+</section>
+
+<!-- ============ 09 RESULTS: ACCURACY ============ -->
+<section class="page" id="results-accuracy" data-title="Accuracy" data-group="Results">
+  <div class="eyebrow">Results</div><h1>Detection accuracy</h1>
+  <p class="lead">On the synthetic workload Layer 2 reaches precision ≈ 0.74 and recall ≈ 0.75. Both depend on the assumed mix and decoy rate, not on mainnet.</p>
+  <h2>Block size</h2>
+  <div data-chart="acc1"></div>
+  <p>Precision stays between 0.725 and 0.746. Recall is 0.743–0.761 up to 400 transactions per block, then falls to 0.452 at 800 and 0.231 at 1 600. The cause is the cap of five detections per block: a block of 800 holds about 8 injected sandwiches, so recall is bounded by about 0.75 × 5/8 ≈ 0.47. This is a configuration limit, not a loss of detection ability. The experiment was not repeated with a higher cap.</p>
+  <div data-table="s1"></div>
+  <h2>Worker threads</h2>
+  <div data-chart="accNodes"></div>
+  <p>Precision (0.737) and recall (0.748) are identical for 1 to 16 nodes. Sharding blocks over workers does not change the result.</p>
+  <h2>Decoy sensitivity</h2>
+  <div data-chart="decoy"></div>
+  <div data-table="sens"></div>
+  <div class="note"><b>Reading the decoy rate</b>Layer 2 reports any (sender, contract) pair around another sender's swap, so a trading bot acting twice around an unrelated swap looks like an attack. With sandwiches at 1 % and 75 % found, about 0.75 true detections occur per 100 transactions, so each added decoy rate <i>d</i> (per 100 tx) lowers precision to 0.75/(0.75 + <i>d</i>). The measured values match. Real traffic has far more look-alikes than 0.25 %: the structural rule alone was only about 7 % precise on mainnet.</div>
+  <h2>Layer 1 on the synthetic workload</h2>
+  <p>Corrected Layer 1 has precision 1.00 and recall 0.11–0.13, because it recognises only router-based attacks (type B, 15 %) that also satisfy the gas ordering (80 %). The version first built has recall below 0.01. See <a href="#layer1">Layer 1</a>.</p>
+  <div class="pn"></div>
+</section>
+
+<!-- ============ 10 RESULTS: PERFORMANCE ============ -->
+<section class="page" id="results-perf" data-title="Latency &amp; scaling" data-group="Results">
+  <div class="eyebrow">Results</div><h1>Latency, throughput and scaling</h1>
+  <p class="lead">The analysis is fast. On mainnet the delay is set by the network and the provider, and scaling over threads peaks at 2.5× on this machine.</p>
+  <h2>Analysis time</h2>
+  <div data-tabs><div data-tab="By block size"><div data-chart="lat1"></div></div><div data-tab="By worker threads"><div data-chart="lat2"></div></div></div>
+  <p>Mean analysis time grows from 0.03 ms at 50 transactions per block to 1.47 ms at 1 600 (95th percentile 0.04 to 2.75 ms), close to proportional to block size. Layer 1 costs 76 µs per pending transaction at 50 tx/block and 224 µs at 1 600.</p>
+  <h2>Throughput</h2>
+  <div data-chart="thr1"></div>
+  <p>These rates are for in-memory analysis of generated blocks. They exclude network and RPC cost and are far above the 24.8 tx/s that mainnet supplied on average in the live run (178 660 transactions in 7 200 s).</p>
+  <h2>Scalability</h2>
+  <div class="grid g2"><div data-chart="speed"></div><div data-chart="eff"></div></div>
+  <div data-table="s2"></div>
+  <p>Speed-up is 1.93 at two nodes and peaks at 2.52 at four, then falls to 2.39 at eight and 1.78 at 16. The processor has six physical cores and 12 hardware threads, so the plateau is consistent with competition for cores and shared resources. Memory bandwidth and scheduling were not examined, so the cause was not isolated. This is scaling on one machine, not across machines.</p>
+  <h2>Mainnet delay</h2>
+  <div data-chart="cdf"></div>
+  <div class="grid g4">
+    <div class="card"><div class="stat">523<small>ms</small></div><div class="stat-l">median header → candidate</div></div>
+    <div class="card"><div class="stat">1 125<small>ms</small></div><div class="stat-l">95th percentile</div></div>
+    <div class="card"><div class="stat">307<small>ms</small></div><div class="stat-l">mean block fetch</div></div>
+    <div class="card"><div class="stat">263<small>ms</small></div><div class="stat-l">mean validation per candidate</div></div>
+  </div>
+  <p>Analysis itself took 0.23 ms per block on average, so the delay is made up mostly of the block fetch and the receipt validation.</p>
+  <div class="pn"></div>
+</section>
+
+<!-- ============ 11 RESULTS: CHAIN ============ -->
+<section class="page" id="results-chain" data-title="On-chain recording" data-group="Results">
+  <div class="eyebrow">Results</div><h1>On-chain recording: inclusion and gas</h1>
+  <p class="lead">Gas is not the limit. Nonce handling is: concurrent submission from one account lost almost every transaction.</p>
+  <div class="note bad"><b>Finding</b>When several detections were submitted at once from one account, each took the account's next nonce from the node before the others were mined. The node accepted the first and rejected the rest as replacements with too small a fee increase. Inclusion was 1/n for a burst of n. Explicit nonces gave inclusion 1.00 everywhere.</div>
+  <h2>Burst size (one submitter)</h2>
+  <div class="grid g2"><div data-chart="incl1"></div><div data-chart="gas1"></div></div>
+  <div data-table="c1"></div>
+  <h2>Number of submitter nodes (batch of 20)</h2>
+  <div class="grid g2"><div data-chart="incl2"></div><div data-chart="gas2"></div></div>
+  <div data-table="c2"></div>
+  <p>Sharding keeps total gas near 1.42 million whatever the number of nodes. Replication raises it to 2.10, 3.45 and 6.17 million for 2, 4 and 8 nodes because each node repeats the same writes. The growth is less than proportional since repeated writes to an address cost less than the first.</p>
+  <h2>Confirmation time</h2>
+  <div data-chart="flaglat"></div>
+  <p>The mean confirmation time was 1.6 to 2.1 s in every configuration (single repetitions 1.3 to 2.3 s), which reflects the 2 s block interval set for the local node, not the contract. Confirmation on Base Sepolia was not measured.</p>
+  <div class="note warn"><b>Scope</b>The test is the worst case, with many detections at the same moment from one account. The backend throttles a repeat flag for the same attacker to once per ten minutes, so the loss appears only when several different attackers are flagged at about the same time. The flag path as built still cannot be relied on under bursts.</div>
+  <div class="pn"></div>
+</section>
+
+<!-- ============ 12 RESULTS: LIVE ============ -->
+<section class="page" id="results-live" data-title="Live mainnet" data-group="Results">
+  <div class="eyebrow">Results</div><h1>Live mainnet evaluation</h1>
+  <p class="lead">120 minutes, 598 blocks, 178 660 transactions. Flagging off. 9 November 2026.</p>
+  <div class="grid g4">
+    <div class="card"><div class="stat">367</div><div class="stat-l">Layer 2 candidates (0.61 per block)</div></div>
+    <div class="card"><div class="stat">25</div><div class="stat-l">passed validation (6.8 %)</div></div>
+    <div class="card"><div class="stat">0.958</div><div class="stat-l">precision after validation, n = 24 (Wilson 0.798–0.993)</div></div>
+    <div class="card"><div class="stat">0</div><div class="stat-l">Layer 1 detections</div></div>
+  </div>
+  <h2>Candidates over time</h2>
+  <div data-chart="cum"></div>
+  <p>Candidates accumulated steadily at about three per minute (96 after 30 min, 191 after 60, 277 after 90, 367 after 120).</p>
+  <h2>Effect of validation</h2>
+  <ul>
+    <li>Of 25 validated, 24 could be judged: <b>23 were attacks and one was not</b>.</li>
+    <li>One validated candidate could not be labelled because its net profit could not be decided from the transfers.</li>
+    <li>Of a systematic sample of 25 of the 342 rejected candidates, none was an attack (upper 95 % bound 0.133).</li>
+    <li>Weighting the two groups by size gives about 0.065 precision for the structural rule alone (interval 0.054–0.19). Validation raised the precision of reported detections from about 7 % to about 96 %.</li>
+    <li>The 25 validated detections came from 24 blocks and <b>11 attacker addresses</b>; two addresses account for 14 of them.</li>
+  </ul>
+  <div class="note warn"><b>Limits of this estimate</b>The sample is small and the intervals are wide. The author assigned the labels from the receipts, and the validator uses a related criterion, so the two are not independent. Recall cannot be measured on mainnet because no complete list of attacks exists: the results say how often an alarm was right, not how many attacks were missed. Only 25 of 342 rejected candidates were checked.</div>
+  <h2>By block size</h2>
+  <div data-chart="bins"></div>
+  <div data-table="bins"></div>
+  <p>The candidate rate rises with block size from about 23 per 100 blocks for blocks up to 200 transactions to about 106 for 500–600. The last two bins hold only 5 and 3 blocks, so the fall in the final bin is noise. Larger blocks contain more look-alike activity, so the structural rule over-reports more in busy blocks.</p>
+  <h2>Layer 1 intake</h2>
+  <div class="grid g2"><div data-chart="pend"></div><div data-chart="buf"></div></div>
+  <p>About 4 060 hashes arrived per minute against a fetch cap of 20 per second. About 1 066 fetches were attempted per minute and 813 returned a transaction (20 % of hashes received). The rest were dropped from the full queue (about 2 980 per minute) or returned nothing because the transaction had left the pool (about 24 % of attempts). The mean age of a hash at fetch was 0.58 s. <b>Layer 1 saw about a fifth of the public mempool</b>, which lowers its recall independently of its rule.</p>
+  <h2>The 25 validated detections</h2>
+  <div data-table="valid"></div>
+  <p>Addresses are abbreviated. TP = attack, FP = not an attack, by the author's judgement from the receipts. The one FP was a Uniswap v4 trade in which attacker and victim used the same pool manager but different pairs.</p>
+  <div class="pn"></div>
+</section>
+
+<!-- ============ 13 CASE STUDY ============ -->
+<section class="page" id="casestudy" data-title="Case study" data-group="Results">
+  <div class="eyebrow">Results</div><h1>Case study: block 26152692</h1>
+  <p class="lead">One detection from the initial live run (9 October 2026), traced end to end on Etherscan and BaseScan.</p>
+  <div class="tw"><table><thead><tr><th>Item</th><th>Value</th></tr></thead><tbody>
+  <tr><td>Block</td><td class="w">26152692 (Ethereum mainnet), 157 transactions</td></tr>
+  <tr><td>Positions (front, victim, back)</td><td class="w">26, 28, 101</td></tr>
+  <tr><td>Attacker (sender)</td><td class="w"><code>0x595CAA1c…</code></td></tr>
+  <tr><td>Attacker bot contract</td><td class="w">0x30efaaa9…d400 (both legs target it)</td></tr>
+  <tr><td>Victim (sender)</td><td class="w"><code>0xAff8460e…</code></td></tr>
+  <tr><td>Victim swap</td><td class="w">0.199 ETH for 896.59 FTF (French Toast Token), Uniswap V2 via the OKX DEX Router</td></tr>
+  <tr><td>Calldata</td><td class="w">front 11 556, victim 100, back 10 500 bytes</td></tr>
+  <tr><td>Source</td><td class="w">Block reconstruction (Layer 2)</td></tr>
+  <tr><td>On-chain record</td><td class="w"><code>recordAttack</code> on Base Sepolia, Tx <code>0xff81d006…2fc6</code>, block 47877303</td></tr></tbody></table></div>
+  <h2>What was verified</h2>
+  <ul>
+    <li>The order of the three transactions and the identity of the senders were checked on Etherscan. The attacker's two transactions have the same sender and target, and the victim's swap lies between them.</li>
+    <li>The <code>recordAttack</code> transaction was mined and emitted <code>AttackRecorded</code>, confirmed on BaseScan.</li>
+    <li>The event reported <code>totalAttacks = 2</code>: one flag from earlier testing and this one. The on-chain count therefore counts submitted flag transactions, not detected attacks.</li>
+  </ul>
+  <div class="note warn"><b>Unresolved</b>BaseScan showed about 42 000 gas for this flag, against 33 922 for a repeat flag on the local chain and 70 922 for a first flag. The value is consistent with a repeat flag, but the reason for the difference from the local figure was not established. This case was detected before the validation stage existed, and the full identifiers are abbreviated here; the explorer pages hold the full values.</div>
+  <div class="pn"></div>
+</section>
+
+<!-- ============ 14 GALLERY ============ -->
+<section class="page" id="gallery" data-title="Figure gallery" data-group="Results">
+  <div class="eyebrow">Results</div><h1>Figure gallery</h1>
+  <p class="lead">All 26 figures produced by the evaluation scripts. Click to enlarge.</p>
+  <div class="gal" id="galgrid"></div>
+  <div class="pn"></div>
+</section>
+
+<!-- ============ 15 LIMITATIONS ============ -->
+<section class="page" id="limitations" data-title="Limitations" data-group="Reference">
+  <div class="eyebrow">Reference</div><h1>Limitations and threats to validity</h1>
+  <div class="tw"><table><thead><tr><th>Limitation</th><th>Evidence</th><th>Remedy</th></tr></thead><tbody>
+  <tr><td>Heuristic detection</td><td class="w">Structural rule alone about 7 % precise on mainnet (25 of 367 validated)</td><td class="w">Stronger validation; independent labels</td></tr>
+  <tr><td>Mainnet recall unknown</td><td class="w">Only candidates were labelled; no verified set of attacks</td><td class="w">Compare with a public MEV dataset</td></tr>
+  <tr><td>Private order flow</td><td class="w">Layer 1 found none on mainnet; synthetic recall 0.11–0.13</td><td class="w">Treat Layer 1 as supplementary</td></tr>
+  <tr><td>Small labelled sample</td><td class="w">24 judged; Wilson 0.80–0.99</td><td class="w">Longer runs, several providers</td></tr>
+  <tr><td>Laptop measurements</td><td class="w">Scaling stops improving beyond four threads on six cores</td><td class="w">Multi-machine test</td></tr>
+  <tr><td>Synthetic workload</td><td class="w">Mix and rates chosen by the author</td><td class="w">Replay recorded mainnet blocks</td></tr>
+  <tr><td>Weak profit test</td><td class="w">Four validated candidates with a gross profit of six raw units</td><td class="w">Price-based profit in a common unit</td></tr>
+  <tr><td>Single trusted writer</td><td class="w">Owner-only <code>recordAttack</code></td><td class="w">Multi-signature owner or detector quorum</td></tr>
+  <tr><td>Nonce handling</td><td class="w">Concurrent submission from one account lost most transactions</td><td class="w">Explicit nonce management</td></tr>
+  <tr><td>Testnet only</td><td class="w">Contract on Base Sepolia, detection on Ethereum mainnet</td><td class="w">Same-chain deployment and audit</td></tr></tbody></table></div>
+  <h2>Threats to validity</h2>
+  <ul>
+    <li><b>Construct.</b> Synthetic precision and recall measure the detector against the author's own definition of an attack, not field performance.</li>
+    <li><b>Internal.</b> Timings come from a laptop running other software. Three or five repetitions make the error bars approximate.</li>
+    <li><b>External.</b> One two-hour window of mainnet traffic from one provider. Attack frequency and mix vary over time.</li>
+    <li><b>Label.</b> Labels rest on a receipt criterion and the author's judgement; the validator uses a related criterion.</li>
+  </ul>
+  <h2>What the results do not support</h2>
+  <p>They do not support claims about mainnet recall, about financial harm prevented, or about behaviour on Base Sepolia under load. They support three statements: validation is needed for the heuristic to be usable on live data; the detector's own computation is not the bottleneck; and the path from detection to an on-chain record needs careful transaction management.</p>
+  <h2>Future work</h2>
+  <ul>
+    <li>A labelled set of independently verified sandwiches, to estimate recall.</li>
+    <li>Linking addresses to catch split-sender attacks.</li>
+    <li>A price-based profit test and an estimate of the victim's loss by replaying the swap on a forked state.</li>
+    <li>Setting the per-block cap and the 12 s window from data.</li>
+    <li>A multi-signature or quorum writer, and rescaled reputation thresholds.</li>
+  </ul>
+  <div class="pn"></div>
+</section>
+
+<!-- ============ 16 RUN ============ -->
+<section class="page" id="run" data-title="Run &amp; reproduce" data-group="Reference">
+  <div class="eyebrow">Reference</div><h1>Run and reproduce</h1>
+  <h2>Backend</h2>
+  <div class="code l"><span class="lb">bash</span><pre>npm install express ws cors ethers dotenv
+# .env  (never commit this file)
+#   ALCHEMY_WSS_URL=wss://...
+#   ALCHEMY_HTTPS_URL=https://...
+#   REPUTATION_RPC_URL=https://...
+#   REPUTATION_ADDRESS=0xb6CD63eb0FcA8C7e1C1E8d7EeB79E92bEAe9db82
+#   DEPLOYER_PRIVATE_KEY=***
+node server.js
+curl -X POST http://localhost:3001/api/live/start</pre></div>
+  <h2>Evaluation harness</h2>
+  <p>The synthetic experiments need only Node.js and Python with pandas and matplotlib. The chain benchmark needs ethers v6 and a local Hardhat node. The live run needs a mainnet RPC endpoint.</p>
+  <div class="code l"><span class="lb">bash</span><pre>node test_validator.js                 # 12 unit tests
+node bench_cpu.js s1                   # Scenario 1
+node bench_cpu.js s2                   # Scenario 2 (worker threads)
+node bench_cpu.js sens                 # decoy sensitivity
+npx hardhat node                       # in a second terminal
+node chain_bench.js                    # gas, inclusion, confirmation time
+node live_eval.js --minutes 120 --flags none
+python label_tool.py sheet             # randomised labelling sheet
+node evidence.js
+python label_tool.py merge
+python plot.py ; python plot_live.py   # figures</pre></div>
+  <h2>Data files</h2>
+  <div class="tw"><table><thead><tr><th>File</th><th>Content</th></tr></thead><tbody>
+  <tr><td><code>scenario1_cpu.csv</code>, <code>scenario2_cpu.csv</code></td><td class="w">Synthetic benchmarks</td></tr>
+  <tr><td><code>sensitivity_decoys.csv</code></td><td class="w">Decoy-rate sensitivity</td></tr>
+  <tr><td><code>chain_gas.csv</code>, <code>chain_s1.csv</code>, <code>chain_s2.csv</code></td><td class="w">Local-chain benchmarks</td></tr>
+  <tr><td><code>blocks.csv</code>, <code>detections.csv</code>, <code>pending_minutely.csv</code>, <code>meta.json</code></td><td class="w">Live mainnet run</td></tr></tbody></table></div>
+  <h2>Updating this portal</h2>
+  <p>Charts and tables read <code>assets/data.js</code>, which was generated from the CSV files. To refresh it after a new run, regenerate that file from the CSVs. The text pages are plain HTML in <code>index.html</code>.</p>
+  <div class="pn"></div>
+</section>
+
+<!-- ============ 17 FAQ ============ -->
+<section class="page" id="faq" data-title="FAQ &amp; glossary" data-group="Reference">
+  <div class="eyebrow">Reference</div><h1>FAQ and glossary</h1>
+  <h2>Is this real-time?</h2>
+  <p>It is near-real-time, or block-time. Layer 2 analyses each block as it arrives and reported a candidate a median 0.52 s after the block header. It is soft real-time: delay depends on the provider and network and was measured, not bounded. Detection is after inclusion, so it cannot protect the victim of the attack it reports. Layer 1 is the only early-warning path and it saw about a fifth of the pending pool.</p>
+  <h2>Does it prevent sandwich attacks?</h2>
+  <p>No. It records attackers on-chain and lowers their reputation in a contract. Only applications that read that contract are affected.</p>
+  <h2>How accurate is it?</h2>
+  <p>On the synthetic workload precision is about 0.74 and recall about 0.75, but both are set by the assumed mix. On mainnet, 23 of the 24 judged validated candidates were genuine (0.96), labelled by the author. Mainnet recall is unknown.</p>
+  <h2>Why did Layer 1 find nothing?</h2>
+  <p>Many sandwiches are sent as private bundles that never appear in the public pool, and the fetch cap let through only about a fifth of pending hashes. With no positive case, the result does not show whether the rule works on live data.</p>
+  <h2>Why is recall low for large blocks?</h2>
+  <p>Layer 2 reports at most five detections per block. In 800-transaction blocks the synthetic workload holds about eight sandwiches, so the cap bounds recall near 0.47.</p>
+  <h2>Glossary</h2>
+  <div class="tw"><table><tbody>
+  <tr><td><b>MEV</b></td><td class="w">Maximal extractable value: profit from choosing, ordering or inserting transactions in a block.</td></tr>
+  <tr><td><b>Sandwich attack</b></td><td class="w">Front-run and back-run around a victim's swap.</td></tr>
+  <tr><td><b>Mempool</b></td><td class="w">Pending, not yet mined transactions.</td></tr>
+  <tr><td><b>Private order flow</b></td><td class="w">Transactions sent directly to builders (bundles), never visible in the public mempool.</td></tr>
+  <tr><td><b>Slippage</b></td><td class="w">Tolerated difference between expected and executed price.</td></tr>
+  <tr><td><b>Decoy</b></td><td class="w">A non-attack pattern with the same structure as a sandwich.</td></tr>
+  <tr><td><b>Wilson interval</b></td><td class="w">A confidence interval for a proportion that behaves well for small samples.</td></tr>
+  <tr><td><b>Nonce</b></td><td class="w">Per-account transaction counter; two pending transactions with the same nonce conflict.</td></tr></tbody></table></div>
+  <div class="pn"></div>
+</section>
+
+</main>
+<aside class="toc" id="toc"></aside>
+</div>
+
+<div id="sx"><div class="sbox"><input id="si" placeholder="Search the docs…" autocomplete="off"><div class="sres" id="sr"></div></div></div>
+<div id="lb"><div><img id="lbi" alt=""><p id="lbt"></p></div></div>
+<div id="tip"></div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>
